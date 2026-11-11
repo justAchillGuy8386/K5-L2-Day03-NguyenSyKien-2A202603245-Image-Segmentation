@@ -290,10 +290,12 @@ def generate_semantic_task(task_name, rel_path):
 
     images_dir = task_dir / "images"
     image_files = sorted(images_dir.glob("*.jpg"))
+    imageset_content = "\n".join(p.stem for p in image_files) + "\n"
 
     zip_path = SUBMISSIONS_DIR / f"{task_name}.zip"
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("labelmap.txt", labelmap_content.encode("utf-8"))
+        z.writestr("ImageSets/Segmentation/default.txt", imageset_content.encode("utf-8"))
 
         for img_p in image_files:
             img = cv2.imread(str(img_p))
