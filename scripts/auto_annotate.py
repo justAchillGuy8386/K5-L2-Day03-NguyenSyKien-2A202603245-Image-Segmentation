@@ -1,7 +1,8 @@
-"""High-Precision Auto-Annotation and Packaging for Day 3 Segmentation Lab.
+"""Segment Anything Model (Meta SAM 2.1) Auto-Annotation and Packaging Pipeline
+for Day 3 Segmentation Lab.
 
-Utilizes YOLOv8-Seg (Deep Learning Instance Segmentation) and Advanced Multi-Layer
-Color/Edge Semantic Segmentation for Cityscapes/BDD100K road scenes.
+Combines YOLO Object Detection with Meta SAM 2.1 (Segment Anything Model)
+for state-of-the-art prompt-guided polygon segmentation.
 """
 
 import io
@@ -15,7 +16,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image
-from ultralytics import YOLO
+from ultralytics import SAM, YOLO
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -24,26 +25,24 @@ MANIFEST_PATH = DATA_DIR / "manifest.json"
 
 SUBMISSIONS_DIR.mkdir(exist_ok=True)
 
-# Load pretrained YOLOv8-seg model
-print("Loading YOLOv8-Seg model...")
-SEG_MODEL = YOLO("yolov8n-seg.pt")
+print("=" * 65)
+print("Loading Models:")
+print("1. YOLO Detector (Open-vocabulary/COCO classes)...")
+DET_MODEL = YOLO("yolov8n-seg.pt")
+print("2. Meta Segment Anything Model (SAM 2.1: sam2.1_t.pt)...")
+SAM_MODEL = SAM("sam2.1_t.pt")
+print("Models loaded successfully!")
+print("=" * 65)
 
-# Mapping model classes to schema classes
 YOLO_TO_SCHEMA = {
     "person": "person",
     "bicycle": "bicycle",
     "car": "car",
     "motorcycle": "motorcycle",
-    "airplane": None,
     "bus": "bus",
-    "train": None,
     "truck": "truck",
-    "boat": None,
     "traffic light": "traffic light",
-    "fire hydrant": None,
     "stop sign": "traffic sign",
-    "parking meter": None,
-    "bench": None,
 }
 
 
@@ -57,10 +56,10 @@ def polygon_area(pts):
 
 
 # ---------------------------------------------------------------------------
-# High-Quality Instance / Panoptic Generation using YOLOv8-Seg
+# Meta SAM 2.1 Instance / Panoptic Generation
 # ---------------------------------------------------------------------------
 def generate_coco_task(task_name, rel_path, is_panoptic=False):
-    print(f"\n[Instance/Panoptic] Processing {task_name} with YOLOv8-Seg...")
+    print(f"\n[SAM 2.1] Processing {task_name}...")
     task_dir = DATA_DIR / rel_path
     classes_info = json.loads((task_dir / "classes.json").read_text(encoding="utf-8"))
     class_names = classes_info["classes"]
@@ -94,66 +93,70 @@ def generate_coco_task(task_name, rel_path, is_panoptic=False):
             "date_captured": 0
         })
 
-        # Run YOLOv8-seg inference
-        results = SEG_MODEL(str(img_p), conf=0.25, iou=0.5, verbose=False)[0]
+        # Step 1: Detect object bounding boxes
+        det_results = DET_MODEL(str(img_p), conf=0.25, iou=0.5, verbose=False)[0]
 
-        if results.masks is not None:
-            boxes = results.boxes
-            masks_xy = results.masks.xy
+        valid_boxes = []
+        valid_classes = []
 
-            for box, poly_pts in zip(boxes, masks_xy):
+        if det_results.boxes is not None and len(det_results.boxes) > 0:
+            for box in det_results.boxes:
                 raw_cls_id = int(box.cls[0])
-                raw_cls_name = SEG_MODEL.names[raw_cls_id]
+                raw_cls_name = DET_MODEL.names[raw_cls_id]
                 mapped_cls = YOLO_TO_SCHEMA.get(raw_cls_name, raw_cls_name)
 
-                if mapped_cls not in cat_to_id:
-                    continue
+                if mapped_cls in cat_to_id:
+                    xyxy = box.xyxy[0].cpu().numpy().tolist()
+                    valid_boxes.append(xyxy)
+                    valid_classes.append(mapped_cls)
 
-                if len(poly_pts) < 3:
-                    continue
+        # Step 2: Feed bounding boxes to Meta SAM 2.1 for high-precision segmentation
+        if valid_boxes:
+            sam_results = SAM_MODEL(str(img_p), bboxes=valid_boxes, verbose=False)[0]
 
-                # Ensure valid polygon points
-                pts = np.array(poly_pts, dtype=np.float32)
-                pts[:, 0] = np.clip(pts[:, 0], 0, w - 1)
-                pts[:, 1] = np.clip(pts[:, 1], 0, h - 1)
+            if sam_results.masks is not None:
+                for box_coords, mapped_cls, poly_pts in zip(valid_boxes, valid_classes, sam_results.masks.xy):
+                    if len(poly_pts) < 3:
+                        continue
 
-                # Checkpoint special rule: cp1_holes (fill holes inside mask)
-                if task_name == "cp1_holes":
-                    # Re-fill contour to guarantee windows/gaps are not hollow
-                    temp_mask = np.zeros((h, w), dtype=np.uint8)
-                    int_pts = np.round(pts).astype(np.int32)
-                    cv2.fillPoly(temp_mask, [int_pts], 255)
-                    contours, _ = cv2.findContours(temp_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    if contours:
-                        largest = max(contours, key=cv2.contourArea)
-                        pts = largest.reshape(-1, 2).astype(np.float32)
+                    pts = np.array(poly_pts, dtype=np.float32)
+                    pts[:, 0] = np.clip(pts[:, 0], 0, w - 1)
+                    pts[:, 1] = np.clip(pts[:, 1], 0, h - 1)
 
-                area = polygon_area(pts)
-                if area < 50.0:
-                    continue
+                    # cp1_holes rule: windows/gaps stay inside the mask
+                    if task_name == "cp1_holes":
+                        temp_mask = np.zeros((h, w), dtype=np.uint8)
+                        int_pts = np.round(pts).astype(np.int32)
+                        cv2.fillPoly(temp_mask, [int_pts], 255)
+                        contours, _ = cv2.findContours(temp_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        if contours:
+                            largest = max(contours, key=cv2.contourArea)
+                            pts = largest.reshape(-1, 2).astype(np.float32)
 
-                # Bounding box [x, y, bw, bh]
-                x_min, y_min = float(np.min(pts[:, 0])), float(np.min(pts[:, 1]))
-                x_max, y_max = float(np.max(pts[:, 0])), float(np.max(pts[:, 1]))
-                bw = x_max - x_min
-                bh = y_max - y_min
+                    area = polygon_area(pts)
+                    if area < 40.0:
+                        continue
 
-                # Flatten coordinates
-                flat_poly = pts.flatten().tolist()
-                if len(flat_poly) < 6:
-                    continue
+                    x_min, y_min = float(np.min(pts[:, 0])), float(np.min(pts[:, 1]))
+                    x_max, y_max = float(np.max(pts[:, 0])), float(np.max(pts[:, 1]))
+                    bw = x_max - x_min
+                    bh = y_max - y_min
 
-                annotations.append({
-                    "id": ann_id,
-                    "image_id": img_idx,
-                    "category_id": cat_to_id[mapped_cls],
-                    "segmentation": [flat_poly],
-                    "area": round(area, 2),
-                    "bbox": [round(x_min, 2), round(y_min, 2), round(bw, 2), round(bh, 2)],
-                    "iscrowd": 0,
-                    "attributes": {"occluded": False}
-                })
-                ann_id += 1
+                    flat_poly = pts.flatten().tolist()
+                    if len(flat_poly) < 6:
+                        continue
+
+                    annotations.append({
+                        "id": ann_id,
+                        "image_id": img_idx,
+                        "category_id": cat_to_id[mapped_cls],
+                        "segmentation": [flat_poly],
+                        "area": round(area, 2),
+                        "bbox": [round(x_min, 2), round(y_min, 2), round(bw, 2), round(bh, 2)],
+                        "iscrowd": 0,
+                        "attributes": {"occluded": False}
+                    })
+                    ann_id += 1
 
         # Panoptic stuff classes (road, sidewalk, building, vegetation, sky)
         if is_panoptic:
@@ -196,7 +199,7 @@ def generate_coco_task(task_name, rel_path, is_panoptic=False):
         "info": {
             "contributor": "Nguyen Sy Kien",
             "date_created": "2026-11-11",
-            "description": "Day 3 Segmentation High-Precision Submission",
+            "description": "Day 3 Segmentation with Meta SAM (Segment Anything Model)",
             "format": "COCO 1.0",
             "url": "",
             "version": "1.0",
@@ -210,7 +213,7 @@ def generate_coco_task(task_name, rel_path, is_panoptic=False):
     zip_path = SUBMISSIONS_DIR / f"{task_name}.zip"
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("annotations/instances_default.json", json.dumps(coco_payload, indent=2))
-    print(f"  -> Generated {zip_path.name} ({len(annotations)} annotations)")
+    print(f"  -> Generated {zip_path.name} with {len(annotations)} SAM masks.")
     return zip_path
 
 
@@ -250,13 +253,11 @@ def generate_semantic_task(task_name, rel_path):
             mask_rgb = np.zeros((h, w, 3), dtype=np.uint8)
 
             if task_name == "cp4_curb":
-                # Only road and sidewalk
-                # Road on the left/main drive surface, sidewalk on the right curb side
+                # Road vs Sidewalk based on physical curb line
                 road_rgb = colors["road"]
                 sidewalk_rgb = colors["sidewalk"]
                 mask_rgb[:, :] = road_rgb
 
-                # Detect curb line using edge & intensity gradient
                 curb_poly = np.array([
                     [int(w * 0.38), h],
                     [int(w * 0.75), int(h * 0.32)],
@@ -272,13 +273,11 @@ def generate_semantic_task(task_name, rel_path):
                 pole_rgb = colors["pole"]
                 sign_rgb = colors["traffic sign"]
 
-                # Base sky and road
                 mask_rgb[:int(h * 0.52), :] = sky_rgb
                 mask_rgb[int(h * 0.52):, :] = road_rgb
 
-                # Thin poles and signs via Canny edges + vertical lines
+                # Vertical thin poles
                 edges = cv2.Canny(gray, 80, 200)
-                # Vertical structures
                 vert_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 12))
                 vert_poles = cv2.morphologyEx(edges, cv2.MORPH_OPEN, vert_kernel)
                 contours, _ = cv2.findContours(vert_poles, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -287,19 +286,17 @@ def generate_semantic_task(task_name, rel_path):
                     if bh > 40 and bw < 15 and by < int(h * 0.65):
                         cv2.rectangle(mask_rgb, (bx, by), (bx + max(2, bw), by + bh), pole_rgb, -1)
 
-                # Detect signs
-                results = SEG_MODEL(str(img_p), conf=0.2, verbose=False)[0]
+                # Signs
+                results = DET_MODEL(str(img_p), conf=0.2, verbose=False)[0]
                 for box in results.boxes:
-                    lbl = SEG_MODEL.names[int(box.cls[0])]
+                    lbl = DET_MODEL.names[int(box.cls[0])]
                     if lbl in ["traffic light", "stop sign"]:
                         x1, y1, x2, y2 = [int(v) for v in box.xyxy[0]]
                         cv2.rectangle(mask_rgb, (x1, y1), (x2, y2), sign_rgb, -1)
-                        # Thin pole down to ground
                         cx = (x1 + x2) // 2
                         cv2.rectangle(mask_rgb, (cx - 1, y2), (cx + 2, int(h * 0.68)), pole_rgb, -1)
 
             elif task_name == "cp6_coverage":
-                # Full coverage: road, sidewalk, building, vegetation, sky, car, person
                 sky_rgb = colors["sky"]
                 road_rgb = colors["road"]
                 sidewalk_rgb = colors["sidewalk"]
@@ -308,66 +305,63 @@ def generate_semantic_task(task_name, rel_path):
                 car_rgb = colors["car"]
                 person_rgb = colors["person"]
 
-                # 1. Sky
                 sky_mask = (y_coords < int(h * 0.42)) & (hsv[:, :, 2] > 110) & (hsv[:, :, 1] < 120)
                 mask_rgb[sky_mask] = sky_rgb
 
-                # 2. Vegetation
                 veg_mask = (hsv[:, :, 0] >= 28) & (hsv[:, :, 0] <= 88) & (hsv[:, :, 1] > 35) & (hsv[:, :, 2] > 30)
                 mask_rgb[veg_mask & ~sky_mask] = veg_rgb
 
-                # 3. Sidewalk
                 sw_mask = (y_coords >= int(h * 0.52)) & ((x_coords < int(w * 0.22)) | (x_coords > int(w * 0.85)))
                 mask_rgb[sw_mask & ~veg_mask] = sidewalk_rgb
 
-                # 4. Road
                 road_mask = (y_coords >= int(h * 0.52)) & ~sw_mask & ~veg_mask
                 mask_rgb[road_mask] = road_rgb
 
-                # 5. Buildings
                 unlabeled = mask_rgb.sum(axis=2) == 0
                 mask_rgb[unlabeled & (y_coords < int(h * 0.6))] = bldg_rgb
                 mask_rgb[mask_rgb.sum(axis=2) == 0] = road_rgb
 
-                # 6. Cars & Persons from YOLOv8-seg
-                results = SEG_MODEL(str(img_p), conf=0.3, verbose=False)[0]
-                if results.masks is not None:
-                    for box, poly in zip(results.boxes, results.masks.xy):
-                        lbl = SEG_MODEL.names[int(box.cls[0])]
-                        if lbl == "car" and len(poly) >= 3:
-                            cv2.fillPoly(mask_rgb, [np.round(poly).astype(np.int32)], car_rgb)
-                        elif lbl == "person" and len(poly) >= 3:
-                            cv2.fillPoly(mask_rgb, [np.round(poly).astype(np.int32)], person_rgb)
+                # Car & person using SAM
+                det_results = DET_MODEL(str(img_p), conf=0.3, verbose=False)[0]
+                sam_boxes = []
+                box_classes = []
+                for box in det_results.boxes:
+                    lbl = DET_MODEL.names[int(box.cls[0])]
+                    if lbl in ["car", "person"]:
+                        sam_boxes.append(box.xyxy[0].cpu().numpy().tolist())
+                        box_classes.append(lbl)
+
+                if sam_boxes:
+                    sam_res = SAM_MODEL(str(img_p), bboxes=sam_boxes, verbose=False)[0]
+                    if sam_res.masks is not None:
+                        for lbl, poly in zip(box_classes, sam_res.masks.xy):
+                            if len(poly) >= 3:
+                                fill_color = car_rgb if lbl == "car" else person_rgb
+                                cv2.fillPoly(mask_rgb, [np.round(poly).astype(np.int32)], fill_color)
 
             else:
-                # easy_semantic: road, sidewalk, building, vegetation, sky
+                # easy_semantic
                 sky_rgb = colors["sky"]
                 road_rgb = colors["road"]
                 sidewalk_rgb = colors["sidewalk"]
                 bldg_rgb = colors["building"]
                 veg_rgb = colors["vegetation"]
 
-                # 1. Sky: high lightness, upper half
                 sky_mask = (y_coords < int(h * 0.48)) & (hsv[:, :, 2] > 115) & (hsv[:, :, 1] < 125)
-                # Morphology smoothing
                 kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
                 sky_mask = cv2.morphologyEx(sky_mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel).astype(bool)
                 mask_rgb[sky_mask] = sky_rgb
 
-                # 2. Vegetation: Green hue detection
                 veg_mask = (hsv[:, :, 0] >= 28) & (hsv[:, :, 0] <= 88) & (hsv[:, :, 1] > 35) & (hsv[:, :, 2] > 30)
                 veg_mask = cv2.morphologyEx(veg_mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel).astype(bool)
                 mask_rgb[veg_mask & ~sky_mask] = veg_rgb
 
-                # 3. Sidewalk: edges of bottom area
                 sw_mask = (y_coords >= int(h * 0.52)) & ((x_coords < int(w * 0.22)) | (x_coords > int(w * 0.85)))
                 mask_rgb[sw_mask & ~veg_mask] = sidewalk_rgb
 
-                # 4. Road: central drivable surface
                 road_mask = (y_coords >= int(h * 0.52)) & ~sw_mask & ~veg_mask
                 mask_rgb[road_mask] = road_rgb
 
-                # 5. Buildings: backdrop
                 unlabeled = mask_rgb.sum(axis=2) == 0
                 mask_rgb[unlabeled & (y_coords < int(h * 0.65))] = bldg_rgb
                 mask_rgb[mask_rgb.sum(axis=2) == 0] = road_rgb

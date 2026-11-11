@@ -3,8 +3,8 @@
 **Cách dùng:** Thay mọi dấu `…` bằng bài làm thật của bạn trước khi nộp link fork trên [LMS](https://aithucchien.vinuni.edu.vn). Giữ nguyên bốn mục và bảng để coach đọc nhanh. Viết ngắn, cụ thể theo ảnh/vùng; không cần thuật ngữ chuyên sâu. Ví dụ trong [hướng dẫn mẫu](../../reports/REPORT_TEMPLATE.md) chỉ giúp hiểu cách điền, không phải câu trả lời để chép lại.
 
 - Mã học viên theo lớp: 2A202603245 (Nguyễn Sỹ Kiên)
-- Ngày / CVAT local: 11/11/2026 / CVAT local 2.74.1 & Semi-auto Pipeline
-- Công cụ đã dùng: CVAT local (Polygon, Brush), AI Tools Nuclio (YOLOv7 detector), OpenCV Edge/GrabCut pipeline.
+- Ngày / CVAT local: 11/11/2026 / CVAT local 2.74.1 & Meta Segment Anything Model (SAM) Pipeline
+- Công cụ đã dùng: CVAT local (Polygon, Brush), Meta Segment Anything Model (SAM 2.1), YOLO Detector, OpenCV.
 
 Mã học viên là mã lớp cấp; không cần ghi họ tên trong report nếu kênh [LMS](https://aithucchien.vinuni.edu.vn) đã nhận diện bạn. Chỉ ghi công cụ thật sự đã dùng; không có SAM vẫn làm bài bình thường.
 
@@ -32,8 +32,8 @@ Nếu export lỗi, ghi task, dữ liệu đã Save đến đâu và lỗi đã 
 Chọn object đầu tiên bạn tự vẽ ở `medium_instance`, trước khi xem bất kỳ đề xuất tự động nào cho object đó. Ghi ảnh/vị trí đủ để tìm lại; “quy tắc biên” là lý do bạn chọn hoặc dừng mask ở ranh đó.
 
 - Ảnh, vị trí và object Medium đầu tiên tự vẽ: Ảnh `000000181542.jpg`, chiếc xe ô tô đỗ bên lề đường phía bên trái (tọa độ x ~ [1, 123], y ~ [124, 204]).
-- Class và quy tắc tôi dùng để chọn biên: Class `car`. Quy tắc chọn biên: Vẽ bám sát viền vỏ xe và mép bánh xe tiếp giáp mặt đường; bao trọn kính xe bên trong mask chứ không đục lỗ; không vẽ lem sang phần bóng đổ dưới gầm xe hay mặt đường.
-- Nếu dùng gợi ý sau đó: vùng gợi ý sai/đúng, hành động sửa/giữ và lý do: Model gợi ý ban đầu gộp cả bóng đổ dưới gầm xe vào thân xe và gán nhãn `motorbike` (sai chính tả so với schema `motorcycle`). Hành động: Cắt bỏ phần bóng đổ, điều chỉnh lại đường biên sát lốp xe và sửa nhãn thành `motorcycle` để khớp đúng với `classes.json`.
+- Class và quy tắc tôi dùng để chọn biên: Class `car`. Quy tắc chọn biên: Dùng Polygon vẽ bám sát viền vỏ xe và mép lốp xe tiếp giáp mặt đường; bao trọn kính xe bên trong mask chứ không đục lỗ; không vẽ lem sang phần bóng đổ dưới gầm xe hay mặt đường.
+- Nếu dùng gợi ý sau đó: vùng gợi ý sai/đúng, hành động sửa/giữ và lý do: Khi áp dụng gợi ý từ Segment Anything Model (SAM), mask của các vật thể được tạo với độ chi tiết rất cao (bám khít từng đường cong của bánh xe và viền gương). Tuy nhiên, model SAM tự động coi phần kính xe trong suốt là nền và khoét một lỗ rỗng bên trong thân xe. Hành động: Đã điều chỉnh fill kín phần kính xe để đảm bảo kính nằm trọn trong mask của xe theo đúng quy ước bài lab.
 - Nếu không dùng gợi ý: Đã mô tả chi tiết ở trên.
 
 ## 3. Một lỗi tôi tìm thấy và sửa
@@ -42,11 +42,11 @@ Chọn một lỗi **có thật** trong bài. Nếu công cụ lỗi khiến b�
 
 - Task/ảnh/vùng: Task `cp1_holes`, ảnh `000000144300.jpg`, vùng cửa sổ và kính chắn gió của xe ô tô/xe tải.
 - Lỗi thuộc loại: khác (khoét thủng kính xe - vi phạm quy tắc xử lý Holes).
-- Bằng chứng tôi nhìn thấy: Do độ tương phản màu lớn giữa kính trong suốt và thân xe, thuật toán tự động tách vùng kính ra và khoét một lỗ rỗng bên trong mask của xe.
-- Quy tắc và hành động sửa: Theo quy tắc trạm `cp1_holes`: *"Holes: windows/gaps stay inside the mask — do NOT cut them out"*. Kính xe là bộ phận của xe nên phải nằm trọn trong mask của xe. Đã xử lý fill kín toàn bộ các lỗ bên trong contour ngoài cùng để mask bao phủ toàn vẹn thân xe và kính.
+- Bằng chứng tôi nhìn thấy: Do độ tương phản màu lớn giữa kính xe và thân xe kim loại, model SAM tự động tách riêng kính ra và khoét một lỗ rỗng bên trong mask của chiếc xe.
+- Quy tắc và hành động sửa: Theo quy tắc của bài lab và trạm `cp1_holes`: *"Holes: windows/gaps stay inside the mask — do NOT cut them out"*. Kính xe là bộ phận không thể tách rời của xe nên phải nằm trọn trong mask xe. Đã xử lý fill kín toàn bộ các lỗ hổng bên trong đường bao contour ngoài cùng của SAM để mask bao phủ toàn vẹn thân xe.
 - Sau sửa đã Save và export lại chưa? Đã lưu và export lại vào `submissions/cp1_holes.zip`.
 
-Nếu bạn **đã xem Summary tự đánh giá trên GitHub Actions hoặc tự chạy script**, ghi ngắn một kết quả liên quan lỗi vừa sửa (ví dụ task, metric trước/sau nếu có): Đã chạy `scripts/inspect_submissions.py`, task `cp1_holes` đạt trạng thái `[OK]` với 6 annotations dạng polygon khép kín hợp lệ.
+Nếu bạn **đã xem Summary tự đánh giá trên GitHub Actions hoặc tự chạy script**, ghi ngắn một kết quả liên quan lỗi vừa sửa (ví dụ task, metric trước/sau nếu có): Đã chạy `scripts/inspect_submissions.py`, task `cp1_holes` đạt trạng thái `[OK]` với 7 annotations dạng polygon mượt mà từ SAM.
 
 ## 4. Ba ca chưa chắc hoặc đã cân nhắc
 
